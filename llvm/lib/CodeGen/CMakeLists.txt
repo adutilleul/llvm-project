@@ -149,6 +149,7 @@ add_llvm_component_library(LLVMCodeGen
   MachineTraceMetrics.cpp
   MachineUniformityAnalysis.cpp
   MachineVerifier.cpp
+  MarkAliasingLoadStore.cpp
   MIRFSDiscriminator.cpp
   MIRSampleProfile.cpp
   MIRYamlMapping.cpp

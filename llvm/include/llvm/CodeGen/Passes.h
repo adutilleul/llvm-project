@@ -421,6 +421,9 @@ namespace llvm {
   /// machine frame information.
   extern char &FinalizeISelID;
 
+  /// This pass annotates memory accesses whenever an aliasing store is dominated by a load.
+  extern char &MarkAliasingLoadStoreID;
+
   /// UnpackMachineBundles - This pass unpack machine instruction bundles.
   extern char &UnpackMachineBundlesID;
 

@@ -231,4 +231,5 @@ DUMMY_MACHINE_FUNCTION_PASS("twoaddressinstruction", TwoAddressInstructionPass)
 DUMMY_MACHINE_FUNCTION_PASS("unpack-mi-bundles", UnpackMachineBundlesPass)
 DUMMY_MACHINE_FUNCTION_PASS("virtregrewriter", VirtRegRewriterPass)
 DUMMY_MACHINE_FUNCTION_PASS("xray-instrumentation", XRayInstrumentationPass)
+DUMMY_MACHINE_FUNCTION_PASS("mark-aliasing-load-store", MarkAliasingLoadStore)
 #undef DUMMY_MACHINE_FUNCTION_PASS
