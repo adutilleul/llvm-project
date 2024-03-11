@@ -10,7 +10,10 @@
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/InitializePasses.h"
-
+#include "llvm/Analysis/CFG.h"
+#include "llvm/IR/Dominators.h"
+// include loop info
+#include "llvm/Analysis/LoopInfo.h"
 // #include "llvm/CodeGen/MachinePostDominators.h"
 using namespace llvm;
 
@@ -76,6 +79,8 @@ private:
 
   llvm::SmallVector<MachineInstr *> findStores(MachineFunction &MF);
   AliasInformation wrapComputeAliasDistance(MachineInstr *StoreInstr,
+                                            DominatorTree *DT,
+                                            LoopInfo *LI,
                                             MachineDominatorTree *MDT,
                                             MachinePostDominatorTree *MPDT,
                                             const MachineLoopInfo *MLI,
@@ -118,6 +123,7 @@ private:
         }
       }
 
+
       for (const auto &[Block, Distances] : PredDistanceMap) {
         uint64_t MaxDist = std::numeric_limits<uint64_t>::min();
         for (const auto &[Pred, PredDistance] : Distances) {
@@ -126,7 +132,12 @@ private:
 
           // TODO: check if both reacheable sets intersect (or find something similar)
           const bool PrevDominatesStore = MPDT->dominates(StoreInstr->getParent(), Pred);
-          if (PrevDominatesStore && !IgnoredBranches.count(Pred)) {
+          const llvm::BasicBlock* BBfrom = AliasingLoad->getParent()->getBasicBlock();
+          const llvm::BasicBlock* BBto = Pred->getBasicBlock();
+          // llvm::errs() << "IsReachableFromLoad: " << IsReachableFromLoad << "\n";
+          // llvm::errs() << "PrevDominatesStore: " << PrevDominatesStore << "\n";
+          // llvm::errs() << "IgnoredBranches: " << IgnoredBranches.count(Pred) << "\n";
+          if (PrevDominatesStore && !IgnoredBranches.count(Pred) && isPotentiallyReachable(BBfrom, BBto, nullptr, DT, LI)) {
             MaxDist = std::max(MaxDist, PredDistance);
             // llvm::errs() << "Dominates: " << Pred->getName() << " Distance: "
             //              << PredDistance << "\n";
@@ -170,6 +181,8 @@ private:
     AU.addRequired<MachinePostDominatorTree>();
     AU.addRequired<AAResultsWrapperPass>();
     AU.addRequired<MachineLoopInfo>();
+    AU.addRequired<DominatorTreeWrapperPass>();
+    AU.addRequired<LoopInfoWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 };
@@ -183,11 +196,12 @@ INITIALIZE_PASS(MarkAliasingLoadStore, DEBUG_TYPE,
 bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
 
   bool Changed = false;
-
+  DominatorTree *DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   MachineDominatorTree *MDT = &getAnalysis<MachineDominatorTree>();
   MachinePostDominatorTree *MPDT = &getAnalysis<MachinePostDominatorTree>();
   AAResults *AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   MachineLoopInfo *MLI = &getAnalysis<MachineLoopInfo>();
+  LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
 
   llvm::errs() << "MarkAliasingLoadStore Pass\n";
@@ -196,7 +210,7 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
 
   for (MachineInstr *store : findStores(MF)) {
     const auto [distance, load] =
-        wrapComputeAliasDistance(store, MDT, MPDT, MLI, AA, TII);
+        wrapComputeAliasDistance(store, DT, LI, MDT, MPDT, MLI, AA, TII);
 
     if (load != nullptr) {
 
