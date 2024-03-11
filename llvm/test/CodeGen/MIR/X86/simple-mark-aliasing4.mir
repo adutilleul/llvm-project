@@ -1,0 +1,335 @@
+# RUN: llc -o /dev/null 2>&1 -mtriple=x86_64 %s -run-pass=mark-aliasing-load-store | FileCheck %s
+
+# CHECK: Store: MOV32mr killed renamable $rbx, 1, $noreg, 0, $noreg, renamable $ebp :: (store (s32) into %ir.p, !tbaa !2)
+# CHECK-NEXT: Distance: 0
+# CHECK-NEXT: Aliasing load: renamable $ebp = MOV32rm renamable $rbx, 1, $noreg, 0, $noreg :: (load (s32) from %ir.p, !tbaa !2)
+
+--- |
+  ; ModuleID = 'tests/divergent_control_flow2.ll'
+  source_filename = "tests/divergent_control_flow2.c"
+  target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+  target triple = "x86_64-pc-linux-gnu"
+  
+  ; Function Attrs: nofree noinline norecurse nounwind memory(argmem: readwrite, inaccessiblemem: readwrite)
+  define dso_local void @unsafe_no_optimize(ptr noundef %r) local_unnamed_addr #0 {
+  entry:
+    %0 = load volatile i32, ptr %r, align 4, !tbaa !2
+    %cmp = icmp eq i32 %0, 5
+    br i1 %cmp, label %if.then, label %if.end
+  
+  if.then:                                          ; preds = %entry
+    store volatile i32 0, ptr %r, align 4, !tbaa !2
+    br label %if.end
+  
+  if.end:                                           ; preds = %if.then, %entry
+    ret void
+  }
+  
+  ; Function Attrs: nounwind
+  define dso_local i32 @divergent_control_flow2(ptr noundef %p, i32 noundef %size, i32 noundef %off) local_unnamed_addr #1 {
+  entry:
+    %arrayidx = getelementptr inbounds i32, ptr %p, i64 1
+    %cmp29 = icmp sgt i32 %size, 0
+    br i1 %cmp29, label %for.body.preheader, label %for.cond.cleanup
+  
+  for.body.preheader:                               ; preds = %entry
+    %wide.trip.count = zext i32 %size to i64
+    br label %for.body
+  
+  for.cond.cleanup:                                 ; preds = %for.body, %entry
+    switch i32 %off, label %sw.epilog [
+      i32 0, label %sw.bb
+      i32 1, label %sw.bb2
+      i32 2, label %sw.bb3
+      i32 3, label %sw.bb5
+      i32 4, label %sw.bb8
+    ]
+  
+  for.body:                                         ; preds = %for.body, %for.body.preheader
+    %indvars.iv = phi i64 [ 0, %for.body.preheader ], [ %indvars.iv.next, %for.body ]
+    %0 = shl nuw nsw i64 %indvars.iv, 2
+    %scevgep = getelementptr i8, ptr %p, i64 %0
+    %tmp = trunc i64 %indvars.iv to i32
+    store i32 %tmp, ptr %scevgep, align 4, !tbaa !2
+    %indvars.iv.next = add nuw nsw i64 %indvars.iv, 1
+    %exitcond.not = icmp eq i64 %wide.trip.count, %indvars.iv.next
+    br i1 %exitcond.not, label %for.cond.cleanup, label %for.body, !llvm.loop !6
+  
+  sw.bb:                                            ; preds = %for.cond.cleanup
+    %1 = load i32, ptr %arrayidx, align 4, !tbaa !2
+    tail call void @unsafe_no_optimize(ptr noundef nonnull %arrayidx)
+    br label %sw.epilog
+  
+  sw.bb2:                                           ; preds = %for.cond.cleanup
+    %2 = load i32, ptr %p, align 4, !tbaa !2
+    br label %sw.epilog
+  
+  sw.bb3:                                           ; preds = %for.cond.cleanup
+    tail call void @unsafe_no_optimize(ptr noundef nonnull %arrayidx)
+    br label %sw.epilog
+  
+  sw.bb5:                                           ; preds = %for.cond.cleanup
+    tail call void @unsafe_no_optimize(ptr noundef nonnull %arrayidx)
+    br label %sw.epilog
+  
+  sw.bb8:                                           ; preds = %for.cond.cleanup
+    tail call void @unsafe_no_optimize(ptr noundef nonnull %arrayidx)
+    br label %sw.epilog
+  
+  sw.epilog:                                        ; preds = %sw.bb8, %sw.bb5, %sw.bb3, %sw.bb2, %sw.bb, %for.cond.cleanup
+    %v.0 = phi i32 [ undef, %for.cond.cleanup ], [ undef, %sw.bb8 ], [ undef, %sw.bb5 ], [ undef, %sw.bb3 ], [ %2, %sw.bb2 ], [ %1, %sw.bb ]
+    tail call void asm sideeffect "mfence", "~{memory},~{dirflag},~{fpsr},~{flags}"() #2, !srcloc !8
+    store i32 %v.0, ptr %p, align 4, !tbaa !2
+    ret i32 %v.0
+  }
+  
+  attributes #0 = { nofree noinline norecurse nounwind memory(argmem: readwrite, inaccessiblemem: readwrite) "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-features"="+cx8,+mmx,+sse,+sse2,+x87" }
+  attributes #1 = { nounwind "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-features"="+cx8,+mmx,+sse,+sse2,+x87" }
+  attributes #2 = { nounwind }
+  
+  !llvm.module.flags = !{!0}
+  !llvm.ident = !{!1}
+  
+  !0 = !{i32 1, !"wchar_size", i32 4}
+  !1 = !{!"clang version 17.0.6"}
+  !2 = !{!3, !3, i64 0}
+  !3 = !{!"int", !4, i64 0}
+  !4 = !{!"omnipotent char", !5, i64 0}
+  !5 = !{!"Simple C/C++ TBAA"}
+  !6 = distinct !{!6, !7}
+  !7 = !{!"llvm.loop.mustprogress"}
+  !8 = !{i64 959}
+
+...
+---
+name:            unsafe_no_optimize
+alignment:       16
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHCatchret:   false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   true
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:
+  - { reg: '$rdi', virtual-reg: '' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    1
+  adjustsStack:    false
+  hasCalls:        false
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 4294967295
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  localFrameSize:  0
+  savePoint:       ''
+  restorePoint:    ''
+fixedStack:      []
+stack:           []
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.1(0x40000000), %bb.2(0x40000000)
+    liveins: $rdi
+  
+    renamable $eax = MOV32rm renamable $rdi, 1, $noreg, 0, $noreg :: (volatile load (s32) from %ir.r, !tbaa !2)
+    CMP32ri killed renamable $eax, 5, implicit-def $eflags
+    JCC_1 %bb.2, 5, implicit killed $eflags
+    JMP_1 %bb.1
+  
+  bb.1.if.then:
+    successors: %bb.2(0x80000000)
+    liveins: $rdi
+  
+    MOV32mi killed renamable $rdi, 1, $noreg, 0, $noreg, 0 :: (volatile store (s32) into %ir.r, !tbaa !2)
+  
+  bb.2.if.end:
+    RET 0
+
+...
+---
+name:            divergent_control_flow2
+alignment:       16
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHCatchret:   false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   true
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:
+  - { reg: '$rdi', virtual-reg: '' }
+  - { reg: '$esi', virtual-reg: '' }
+  - { reg: '$edx', virtual-reg: '' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    1
+  adjustsStack:    false
+  hasCalls:        true
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 4294967295
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  localFrameSize:  0
+  savePoint:       ''
+  restorePoint:    ''
+fixedStack:      []
+stack:           []
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo: {}
+jumpTable:
+  kind:            block-address
+  entries:
+    - id:              0
+      blocks:          [ '%bb.6', '%bb.7', '%bb.8', '%bb.9', '%bb.10' ]
+body:             |
+  bb.0.entry:
+    successors: %bb.1(0x50000000), %bb.2(0x30000000)
+    liveins: $edx, $esi, $rdi
+  
+    renamable $rbx = COPY $rdi
+    TEST32rr renamable $esi, renamable $esi, implicit-def $eflags
+    JCC_1 %bb.2, 14, implicit killed $eflags
+    JMP_1 %bb.1
+  
+  bb.1.for.body.preheader:
+    successors: %bb.5(0x80000000)
+    liveins: $edx, $esi, $rbx
+  
+    renamable $eax = MOV32rr killed renamable $esi, implicit-def $rax
+    renamable $ecx = MOV32r0 implicit-def dead $eflags, implicit-def $rcx
+    JMP_1 %bb.5
+  
+  bb.2.for.cond.cleanup:
+    successors: %bb.3(0x15555555), %bb.4(0x6aaaaaab)
+    liveins: $edx, $rbx
+  
+    CMP32ri renamable $edx, 4, implicit-def $eflags
+    JCC_1 %bb.4, 6, implicit killed $eflags
+  
+  bb.3:
+    successors: %bb.11(0x80000000)
+    liveins: $rbx
+  
+    renamable $ebp = IMPLICIT_DEF
+    JMP_1 %bb.11
+  
+  bb.4.for.cond.cleanup:
+    successors: %bb.6(0x1999999a), %bb.7(0x1999999a), %bb.8(0x1999999a), %bb.9(0x1999999a), %bb.10(0x1999999a)
+    liveins: $edx, $rbx
+  
+    renamable $rdi = LEA64r renamable $rbx, 1, $noreg, 4, $noreg
+    renamable $eax = MOV32rr killed renamable $edx, implicit-def $rax
+    JMP64m $noreg, 8, killed renamable $rax, %jump-table.0, $noreg :: (load (s64) from jump-table)
+  
+  bb.5.for.body:
+    successors: %bb.2(0x04000000), %bb.5(0x7c000000)
+    liveins: $edx, $rax, $rbx, $rcx
+  
+    MOV32mr renamable $rbx, 4, renamable $rcx, 0, $noreg, renamable $ecx :: (store (s32) into %ir.scevgep, !tbaa !2)
+    renamable $rcx = nuw nsw INC64r killed renamable $rcx, implicit-def dead $eflags
+    CMP64rr renamable $rax, renamable $rcx, implicit-def $eflags
+    JCC_1 %bb.2, 4, implicit killed $eflags
+    JMP_1 %bb.5
+  
+  bb.6.sw.bb:
+    successors: %bb.11(0x80000000)
+    liveins: $rbx, $rdi
+  
+    renamable $ebp = MOV32rm renamable $rdi, 1, $noreg, 0, $noreg :: (load (s32) from %ir.arrayidx, !tbaa !2)
+    ADJCALLSTACKDOWN64 0, 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    CALL64pcrel32 @unsafe_no_optimize, csr_64, implicit $rsp, implicit $ssp, implicit $rdi, implicit-def $rsp, implicit-def $ssp
+    ADJCALLSTACKUP64 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    JMP_1 %bb.11
+  
+  bb.7.sw.bb2:
+    successors: %bb.11(0x80000000)
+    liveins: $rbx
+  
+    renamable $ebp = MOV32rm renamable $rbx, 1, $noreg, 0, $noreg :: (load (s32) from %ir.p, !tbaa !2)
+    JMP_1 %bb.11
+  
+  bb.8.sw.bb3:
+    successors: %bb.11(0x80000000)
+    liveins: $rbx, $rdi
+  
+    ADJCALLSTACKDOWN64 0, 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    CALL64pcrel32 @unsafe_no_optimize, csr_64, implicit $rsp, implicit $ssp, implicit $rdi, implicit-def $rsp, implicit-def $ssp
+    ADJCALLSTACKUP64 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    renamable $ebp = IMPLICIT_DEF
+    JMP_1 %bb.11
+  
+  bb.9.sw.bb5:
+    successors: %bb.11(0x80000000)
+    liveins: $rbx, $rdi
+  
+    ADJCALLSTACKDOWN64 0, 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    CALL64pcrel32 @unsafe_no_optimize, csr_64, implicit $rsp, implicit $ssp, implicit $rdi, implicit-def $rsp, implicit-def $ssp
+    ADJCALLSTACKUP64 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    renamable $ebp = IMPLICIT_DEF
+    JMP_1 %bb.11
+  
+  bb.10.sw.bb8:
+    successors: %bb.11(0x80000000)
+    liveins: $rbx, $rdi
+  
+    ADJCALLSTACKDOWN64 0, 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    CALL64pcrel32 @unsafe_no_optimize, csr_64, implicit $rsp, implicit $ssp, implicit $rdi, implicit-def $rsp, implicit-def $ssp
+    ADJCALLSTACKUP64 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    renamable $ebp = IMPLICIT_DEF
+  
+  bb.11.sw.epilog:
+    liveins: $ebp, $rbx
+  
+    INLINEASM &mfence, 25 /* sideeffect mayload maystore attdialect */, 12 /* clobber */, implicit-def dead early-clobber $df, 12 /* clobber */, implicit-def early-clobber $fpsw, 12 /* clobber */, implicit-def dead early-clobber $eflags, !8
+    MOV32mr killed renamable $rbx, 1, $noreg, 0, $noreg, renamable $ebp :: (store (s32) into %ir.p, !tbaa !2)
+    $eax = COPY killed renamable $ebp
+    RET 0, $eax
+
+...

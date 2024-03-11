@@ -1,0 +1,266 @@
+# RUN: llc -o /dev/null 2>&1 -mtriple=x86_64 %s -run-pass=mark-aliasing-load-store | FileCheck %s
+
+# CHECK: MOV32mr killed renamable $rbx, 4, killed renamable $r15, 0, $noreg, killed renamable $eax :: (store (s32) into %ir.sunkaddr1, !tbaa !2)
+# CHECK-NEXT: Distance: 2
+# CHECK-NEXT: Aliasing load: renamable $r14d = MOV32rm $rdi, 4, renamable $r15, 0, $noreg, implicit-def $r14 :: (load (s32) from %ir.arrayidx, !tbaa !2)
+
+
+--- |
+  ; ModuleID = 'tests/diff_basic_block.ll'
+  source_filename = "tests/diff_basic_block.c"
+  target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+  target triple = "x86_64-pc-linux-gnu"
+  
+  ; Function Attrs: nofree noinline norecurse nounwind memory(argmem: readwrite, inaccessiblemem: readwrite)
+  define dso_local void @unsafe_no_optimize(ptr noundef %r) local_unnamed_addr #0 {
+  entry:
+    %0 = load volatile i32, ptr %r, align 4, !tbaa !2
+    %cmp = icmp eq i32 %0, 5
+    br i1 %cmp, label %if.then, label %if.end
+  
+  if.then:                                          ; preds = %entry
+    store volatile i32 0, ptr %r, align 4, !tbaa !2
+    br label %if.end
+  
+  if.end:                                           ; preds = %if.then, %entry
+    ret void
+  }
+  
+  ; Function Attrs: nofree norecurse nounwind memory(argmem: readwrite, inaccessiblemem: readwrite)
+  define dso_local i32 @diff_basic_block(ptr noundef %p, i32 noundef %offset) local_unnamed_addr #1 {
+  entry:
+    %dec = add nsw i32 %offset, -1
+    %idxprom = sext i32 %offset to i64
+    %arrayidx = getelementptr inbounds i32, ptr %p, i64 %idxprom
+    %0 = load i32, ptr %arrayidx, align 4, !tbaa !2
+    %shl = shl i32 %dec, 10
+    %idx.ext = sext i32 %shl to i64
+    %add.ptr = getelementptr inbounds i32, ptr %p, i64 %idx.ext
+    store i32 0, ptr %add.ptr, align 4, !tbaa !2
+    br label %for.body
+  
+  for.cond.cleanup:                                 ; preds = %for.body
+    %cmp1 = icmp eq i32 %dec, 3
+    br i1 %cmp1, label %if.then, label %if.end
+  
+  for.body:                                         ; preds = %for.body, %entry
+    %lsr.iv = phi i32 [ %lsr.iv.next, %for.body ], [ 10000, %entry ]
+    tail call void @unsafe_no_optimize(ptr noundef %p)
+    %lsr.iv.next = add nsw i32 %lsr.iv, -1
+    %exitcond.not = icmp eq i32 %lsr.iv.next, 0
+    br i1 %exitcond.not, label %for.cond.cleanup, label %for.body, !llvm.loop !6
+  
+  if.then:                                          ; preds = %for.cond.cleanup
+    %arrayidx2 = getelementptr inbounds i32, ptr %p, i64 4
+    %1 = load i32, ptr %arrayidx2, align 4, !tbaa !2
+    %add = add nsw i32 %1, %0
+    %arrayidx3 = getelementptr inbounds i32, ptr %p, i64 3
+    %2 = load i32, ptr %arrayidx3, align 4, !tbaa !2
+    %add4 = add nsw i32 %add, %2
+    br label %if.end
+  
+  if.end:                                           ; preds = %if.then, %for.cond.cleanup
+    %t.0 = phi i32 [ %add4, %if.then ], [ %0, %for.cond.cleanup ]
+    %add5 = add nsw i32 %t.0, 1
+    %sunkaddr = mul i64 %idxprom, 4
+    %sunkaddr1 = getelementptr inbounds i8, ptr %p, i64 %sunkaddr
+    store i32 %add5, ptr %sunkaddr1, align 4, !tbaa !2
+    ret i32 %t.0
+  }
+  
+  attributes #0 = { nofree noinline norecurse nounwind memory(argmem: readwrite, inaccessiblemem: readwrite) "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-features"="+cx8,+mmx,+sse,+sse2,+x87" }
+  attributes #1 = { nofree norecurse nounwind memory(argmem: readwrite, inaccessiblemem: readwrite) "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-features"="+cx8,+mmx,+sse,+sse2,+x87" }
+  
+  !llvm.module.flags = !{!0}
+  !llvm.ident = !{!1}
+  
+  !0 = !{i32 1, !"wchar_size", i32 4}
+  !1 = !{!"clang version 17.0.6"}
+  !2 = !{!3, !3, i64 0}
+  !3 = !{!"int", !4, i64 0}
+  !4 = !{!"omnipotent char", !5, i64 0}
+  !5 = !{!"Simple C/C++ TBAA"}
+  !6 = distinct !{!6, !7}
+  !7 = !{!"llvm.loop.mustprogress"}
+
+...
+---
+name:            unsafe_no_optimize
+alignment:       16
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHCatchret:   false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   true
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:
+  - { reg: '$rdi', virtual-reg: '' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    1
+  adjustsStack:    false
+  hasCalls:        false
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 4294967295
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  localFrameSize:  0
+  savePoint:       ''
+  restorePoint:    ''
+fixedStack:      []
+stack:           []
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.1(0x40000000), %bb.2(0x40000000)
+    liveins: $rdi
+  
+    renamable $eax = MOV32rm renamable $rdi, 1, $noreg, 0, $noreg :: (volatile load (s32) from %ir.r, !tbaa !2)
+    CMP32ri killed renamable $eax, 5, implicit-def $eflags
+    JCC_1 %bb.2, 5, implicit killed $eflags
+    JMP_1 %bb.1
+  
+  bb.1.if.then:
+    successors: %bb.2(0x80000000)
+    liveins: $rdi
+  
+    MOV32mi killed renamable $rdi, 1, $noreg, 0, $noreg, 0 :: (volatile store (s32) into %ir.r, !tbaa !2)
+  
+  bb.2.if.end:
+    RET 0
+
+...
+---
+name:            diff_basic_block
+alignment:       16
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHCatchret:   false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   true
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:
+  - { reg: '$rdi', virtual-reg: '' }
+  - { reg: '$esi', virtual-reg: '' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    1
+  adjustsStack:    false
+  hasCalls:        true
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 4294967295
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  localFrameSize:  0
+  savePoint:       ''
+  restorePoint:    ''
+fixedStack:      []
+stack:           []
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.2(0x80000000)
+    liveins: $esi, $rdi
+  
+    renamable $ebp = COPY $esi
+    renamable $rbx = COPY $rdi
+    renamable $r15 = MOVSX64rr32 $esi
+    renamable $ebp = nsw DEC32r killed renamable $ebp, implicit-def dead $eflags
+    renamable $r14d = MOV32rm $rdi, 4, renamable $r15, 0, $noreg, implicit-def $r14 :: (load (s32) from %ir.arrayidx, !tbaa !2)
+    renamable $eax = COPY renamable $ebp
+    renamable $eax = SHL32ri killed renamable $eax, 10, implicit-def dead $eflags
+    renamable $rax = MOVSX64rr32 killed renamable $eax
+    MOV32mi $rdi, 4, killed renamable $rax, 0, $noreg, 0 :: (store (s32) into %ir.add.ptr, !tbaa !2)
+    renamable $r12d = MOV32ri 10000
+    JMP_1 %bb.2
+  
+  bb.1.for.cond.cleanup:
+    successors: %bb.3(0x40000000), %bb.5(0x40000000)
+    liveins: $ebp, $rbx, $r14, $r15
+  
+    CMP32ri killed renamable $ebp, 3, implicit-def $eflags
+    JCC_1 %bb.3, 4, implicit killed $eflags
+  
+  bb.5:
+    successors: %bb.4(0x80000000)
+    liveins: $rbx, $r14, $r15
+  
+    JMP_1 %bb.4
+  
+  bb.2.for.body:
+    successors: %bb.1(0x04000000), %bb.2(0x7c000000)
+    liveins: $ebp, $rbx, $r14, $r15, $r12d
+  
+    ADJCALLSTACKDOWN64 0, 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    $rdi = COPY renamable $rbx
+    CALL64pcrel32 @unsafe_no_optimize, csr_64, implicit $rsp, implicit $ssp, implicit $rdi, implicit-def $rsp, implicit-def $ssp
+    ADJCALLSTACKUP64 0, 0, implicit-def dead $rsp, implicit-def dead $eflags, implicit-def dead $ssp, implicit $rsp, implicit $ssp
+    renamable $r12d = DEC32r killed renamable $r12d, implicit-def $eflags
+    JCC_1 %bb.1, 4, implicit killed $eflags
+    JMP_1 %bb.2
+  
+  bb.3.if.then:
+    successors: %bb.4(0x80000000)
+    liveins: $rbx, $r14, $r15
+  
+    renamable $r14d = nsw ADD32rm renamable $r14d, renamable $rbx, 1, $noreg, 16, $noreg, implicit-def dead $eflags, implicit killed $r14, implicit-def $r14 :: (load (s32) from %ir.arrayidx2, !tbaa !2)
+    renamable $r14d = nsw ADD32rm renamable $r14d, renamable $rbx, 1, $noreg, 12, $noreg, implicit-def dead $eflags, implicit killed $r14, implicit-def $r14 :: (load (s32) from %ir.arrayidx3, !tbaa !2)
+  
+  bb.4.if.end:
+    liveins: $rbx, $r14, $r15
+  
+    renamable $eax = LEA64_32r renamable $r14, 1, $noreg, 1, $noreg
+    MOV32mr killed renamable $rbx, 4, killed renamable $r15, 0, $noreg, killed renamable $eax :: (store (s32) into %ir.sunkaddr1, !tbaa !2)
+    $eax = COPY renamable $r14d, implicit killed $r14
+    RET 0, $eax
+
+...
+
