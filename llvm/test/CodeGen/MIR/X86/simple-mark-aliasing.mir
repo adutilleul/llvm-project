@@ -1,0 +1,103 @@
+# RUN: llc -o /dev/null 2>&1 -mtriple=x86_64 %s -run-pass=mark-aliasing-load-store | FileCheck %s
+
+# CHECK: Store: MOV32mr killed renamable $rdi, 4, killed renamable $rcx, 0, $noreg, killed renamable $edx :: (store (s32) into %ir.arrayidx, !tbaa !2)
+# CHECK: Distance: 1
+# CHECK: Aliasing load: renamable $eax = MOV32rm renamable $rdi, 4, renamable $rcx, 0, $noreg, implicit-def $rax :: (load (s32) from %ir.arrayidx, !tbaa !2)
+
+--- |
+  ; ModuleID = 'tests/simple_basic_block.ll'
+  source_filename = "tests/simple_basic_block.c"
+  target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+  target triple = "x86_64-pc-linux-gnu"
+  
+  ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: readwrite)
+  define dso_local i32 @same_basic_block(ptr nocapture noundef %p, i32 noundef %offset) local_unnamed_addr #0 {
+  entry:
+    %idxprom = sext i32 %offset to i64
+    %arrayidx = getelementptr inbounds i32, ptr %p, i64 %idxprom
+    %0 = load i32, ptr %arrayidx, align 4, !tbaa !2
+    %arrayidx1 = getelementptr inbounds i32, ptr %p, i64 5
+    %1 = load i32, ptr %arrayidx1, align 4, !tbaa !2
+    %add = add nsw i32 %0, 1
+    store i32 %add, ptr %arrayidx, align 4, !tbaa !2
+    %add4 = add nsw i32 %1, %0
+    ret i32 %add4
+  }
+  
+  attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: readwrite) "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-features"="+cx8,+mmx,+sse,+sse2,+x87" }
+  
+  !llvm.module.flags = !{!0}
+  !llvm.ident = !{!1}
+  
+  !0 = !{i32 1, !"wchar_size", i32 4}
+  !1 = !{!"clang version 17.0.6"}
+  !2 = !{!3, !3, i64 0}
+  !3 = !{!"int", !4, i64 0}
+  !4 = !{!"omnipotent char", !5, i64 0}
+  !5 = !{!"Simple C/C++ TBAA"}
+
+...
+---
+name:            same_basic_block
+alignment:       16
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHCatchret:   false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   true
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:
+  - { reg: '$rdi', virtual-reg: '' }
+  - { reg: '$esi', virtual-reg: '' }
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       0
+  offsetAdjustment: 0
+  maxAlignment:    1
+  adjustsStack:    false
+  hasCalls:        false
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 4294967295
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  localFrameSize:  0
+  savePoint:       ''
+  restorePoint:    ''
+fixedStack:      []
+stack:           []
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $esi, $rdi
+  
+    renamable $rcx = MOVSX64rr32 killed renamable $esi
+    renamable $eax = MOV32rm renamable $rdi, 4, renamable $rcx, 0, $noreg, implicit-def $rax :: (load (s32) from %ir.arrayidx, !tbaa !2)
+    renamable $edx = LEA64_32r renamable $rax, 1, $noreg, 1, $noreg
+    renamable $eax = nsw ADD32rm renamable $eax, renamable $rdi, 1, $noreg, 20, $noreg, implicit-def dead $eflags, implicit killed $rax, implicit-def $rax :: (load (s32) from %ir.arrayidx1, !tbaa !2)
+    MOV32mr killed renamable $rdi, 4, killed renamable $rcx, 0, $noreg, killed renamable $edx :: (store (s32) into %ir.arrayidx, !tbaa !2)
+    $eax = KILL renamable $eax, implicit killed $rax
+    RET 0, $eax
+
+...

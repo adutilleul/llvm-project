@@ -145,8 +145,7 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
     if (load != nullptr) {
       llvm::errs() << "========================\n";
 
-      llvm::errs() << "Store: \n";
-      store->print(llvm::errs());
+      llvm::errs() << "Store: " << *store;
 
       if (distance == MarkerLoop)
         llvm::errs() << "Distance: Unbounded because of a loop\n";
@@ -155,8 +154,7 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
 
       insertMarker(load->getParent(), load, load);
 
-      llvm::errs() << "Aliasing load: \n";
-      load->print(llvm::errs());
+      llvm::errs() << "Aliasing load: " << *load;
 
       llvm::errs() << "========================\n";
     }
