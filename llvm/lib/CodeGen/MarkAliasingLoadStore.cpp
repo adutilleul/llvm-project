@@ -11,6 +11,7 @@
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/InitializePasses.h"
 
@@ -40,7 +41,7 @@ private:
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   bool insertMarker(MachineBasicBlock *MBB, MachineInstr *InsertBefore,
-                    MachineInstr *LoadInst);
+                    MachineInstr *LoadInst, const TargetRegisterInfo *TRI);
 
   llvm::SmallVector<MachineInstr *>
   filterInstructions(MachineFunction &MF,
@@ -74,6 +75,15 @@ private:
     return false;
   }
 
+  llvm::Register findBaseRegister(MachineInstr *MI) {
+    for (const MachineOperand &MO : MI->operands()) {
+      if (MO.isReg() && MO.isUse()) {
+        return MO.getReg();
+      }
+    }
+    return 0;
+  }
+
   AliasInformation wrapComputeAliasDistance(
       MachineInstr *StoreInstr, DominatorTree *DT, LoopInfo *LI,
       MachineDominatorTree *MDT, MachinePostDominatorTree *MPDT,
@@ -87,7 +97,6 @@ private:
       AAResults *AA, const TargetInstrInfo *TII);
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesAll();
     AU.addRequired<MachineDominatorTree>();
     AU.addRequired<MachinePostDominatorTree>();
     AU.addRequired<AAResultsWrapperPass>();
@@ -106,24 +115,24 @@ INITIALIZE_PASS(MarkAliasingLoadStore, DEBUG_TYPE,
 
 bool MarkAliasingLoadStore::insertMarker(MachineBasicBlock *MBB,
                                          MachineInstr *InsertBefore,
-                                         MachineInstr *LoadInst) {
+                                         MachineInstr *LoadInst, const TargetRegisterInfo *TRI) {
   const TargetInstrInfo *TII = MBB->getParent()->getSubtarget().getInstrInfo();
-  // const TargetRegisterInfo *TRI =
-  //     MBB->getParent()->getSubtarget().getRegisterInfo();
   const DebugLoc &DL = InsertBefore->getDebugLoc();
   const unsigned Marker = TII->get(TargetOpcode::COPY).getOpcode();
-  const llvm::Register MarkerReg = LoadInst->getOperand(0).getReg();
+  const llvm::Register MarkerReg = findBaseRegister(LoadInst);
 
-  BuildMI(*MBB, InsertBefore, DL, TII->get(Marker))
-      .addReg(MarkerReg)
-      .addReg(MarkerReg);
+  llvm::MachineInstrBuilder builder = BuildMI(*MBB, InsertBefore, DL, TII->get(Marker));
+
+  builder.addDef(MarkerReg, RegState::Renamable);
+  builder.addUse(MarkerReg);
+
 
   return true;
 }
 
 bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
-
   bool Changed = false;
+
   DominatorTree *DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   MachineDominatorTree *MDT = &getAnalysis<MachineDominatorTree>();
   MachinePostDominatorTree *MPDT = &getAnalysis<MachinePostDominatorTree>();
@@ -131,6 +140,7 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
   MachineLoopInfo *MLI = &getAnalysis<MachineLoopInfo>();
   LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
+  const TargetRegisterInfo* TRI = MF.getSubtarget().getRegisterInfo();
 
   llvm::errs() << "MarkAliasingLoadStore Pass\n";
   llvm::errs() << MF.getName() << "\n";
@@ -138,23 +148,23 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
   const auto AllLoads = findLoads(MF);
   llvm::errs() << "Loads: " << AllLoads.size() << "\n";
 
-  for (MachineInstr *store : findStores(MF)) {
-    const auto [distance, load] =
-        wrapComputeAliasDistance(store, DT, LI, MDT, MPDT, MLI, AA, TII);
+  for (MachineInstr *Store : findStores(MF)) {
+    const auto [Distance, AliasingLoad] =
+        wrapComputeAliasDistance(Store, DT, LI, MDT, MPDT, MLI, AA, TII);
 
-    if (load != nullptr) {
+    if (AliasingLoad != nullptr) {
       llvm::errs() << "========================\n";
 
-      llvm::errs() << "Store: " << *store;
+      llvm::errs() << "Store: " << *Store;
 
-      if (distance == MarkerLoop)
+      if (Distance == MarkerLoop)
         llvm::errs() << "Distance: Unbounded because of a loop\n";
       else
-        llvm::errs() << "Distance: " << distance << "\n";
+        llvm::errs() << "Distance: " << Distance << "\n";
 
-      insertMarker(load->getParent(), load, load);
+      insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
 
-      llvm::errs() << "Aliasing load: " << *load;
+      llvm::errs() << "Aliasing load: " << *AliasingLoad;
 
       llvm::errs() << "========================\n";
     }
@@ -187,7 +197,9 @@ AliasInformation MarkAliasingLoadStore::wrapComputeAliasDistance(
   auto [Distance, AliasingLoad] =
       computeAliasDistance(MachineInstrOrBlock{StoreInstr}, Visited,
                            PredDistanceMap, StoreInstr, MDT, MLI, AA, TII);
+                           
   if (AliasingLoad != nullptr) {
+    const llvm::BasicBlock *BBFrom = AliasingLoad->getParent()->getBasicBlock();
 
     SmallSet<MachineBasicBlock *, 4> IgnoredBranches;
     for (MachineBasicBlock *Pred : AliasingLoad->getParent()->predecessors()) {
@@ -230,15 +242,13 @@ AliasInformation MarkAliasingLoadStore::wrapComputeAliasDistance(
         // similar)
         const bool PrevDominatesStore =
             MPDT->dominates(StoreInstr->getParent(), Pred);
-        const llvm::BasicBlock *BBfrom =
-            AliasingLoad->getParent()->getBasicBlock();
-        const llvm::BasicBlock *BBto = Pred->getBasicBlock();
+        const llvm::BasicBlock *BBTo = Pred->getBasicBlock();
         // llvm::errs() << "IsReachableFromLoad: " << IsReachableFromLoad <<
         // "\n"; llvm::errs() << "PrevDominatesStore: " << PrevDominatesStore
         // << "\n"; llvm::errs() << "IgnoredBranches: " <<
         // IgnoredBranches.count(Pred) << "\n";
         if (PrevDominatesStore && !IgnoredBranches.count(Pred) &&
-            isPotentiallyReachable(BBfrom, BBto, nullptr, DT, LI)) {
+            isPotentiallyReachable(BBFrom, BBTo, nullptr, DT, LI)) {
           MaxDist = std::max(MaxDist, PredDistance);
           // llvm::errs() << "Dominates: " << Pred->getName() << " Distance: "
           //              << PredDistance << "\n";
