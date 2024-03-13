@@ -101,6 +101,11 @@ static cl::opt<bool> EnableMISchedLoadClustering(
     cl::desc("Enable load clustering in the machine scheduler"),
     cl::init(false));
 
+static cl::opt<bool> EnableLoadExclusiveHint(
+    "riscv-load-exclusive-hint", cl::Hidden,
+    cl::desc("Enable adding hints to load-exclusive instructions"),
+    cl::init(false));
+
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTarget() {
   RegisterTargetMachine<RISCVTargetMachine> X(getTheRISCV32Target());
   RegisterTargetMachine<RISCVTargetMachine> Y(getTheRISCV64Target());
@@ -126,6 +131,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTarget() {
   initializeRISCVDAGToDAGISelPass(*PR);
   initializeRISCVMoveMergePass(*PR);
   initializeRISCVPushPopOptPass(*PR);
+  initializeRISCVMarkPairwiseAliasingLSPass(*PR);
 }
 
 static StringRef computeDataLayout(const Triple &TT,
@@ -558,6 +564,8 @@ void RISCVPassConfig::addPostRegAlloc() {
   if (TM->getOptLevel() != CodeGenOptLevel::None &&
       EnableRedundantCopyElimination)
     addPass(createRISCVRedundantCopyEliminationPass());
+  if (EnableLoadExclusiveHint)
+    addPass(createRISCVMarkPairwiseAliasingLSPass());
 }
 
 yaml::MachineFunctionInfo *

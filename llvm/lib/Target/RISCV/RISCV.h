@@ -91,6 +91,10 @@ void initializeRISCVO0PreLegalizerCombinerPass(PassRegistry &);
 
 FunctionPass *createRISCVPreLegalizerCombiner();
 void initializeRISCVPreLegalizerCombinerPass(PassRegistry &);
+
+FunctionPass *createRISCVMarkPairwiseAliasingLSPass();
+void initializeRISCVMarkPairwiseAliasingLSPass(PassRegistry &);
+
 } // namespace llvm
 
 #endif
