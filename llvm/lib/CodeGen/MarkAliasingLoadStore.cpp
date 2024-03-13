@@ -10,8 +10,8 @@
 #include "llvm/CodeGen/MachinePostDominators.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
-#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/InitializePasses.h"
 
@@ -41,7 +41,8 @@ private:
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   bool insertMarker(MachineBasicBlock *MBB, MachineInstr *InsertBefore,
-                    MachineInstr *LoadInst, const TargetRegisterInfo *TRI);
+                    MachineInstr *LoadInst, const TargetRegisterInfo *TRI,
+                    bool IsRISCV);
 
   llvm::SmallVector<MachineInstr *>
   filterInstructions(MachineFunction &MF,
@@ -84,6 +85,18 @@ private:
     return 0;
   }
 
+  MCRegister findConstantRegister(const TargetRegisterInfo *TRI) {
+    for (const auto RegClass : TRI->regclasses()) {
+      for (const auto Reg : RegClass->getRegisters()) {
+        if (TRI->isConstantPhysReg(Reg)) {
+          return Reg;
+        }
+      }
+    }
+
+    return 0;
+  }
+
   AliasInformation wrapComputeAliasDistance(
       MachineInstr *StoreInstr, DominatorTree *DT, LoopInfo *LI,
       MachineDominatorTree *MDT, MachinePostDominatorTree *MPDT,
@@ -115,17 +128,22 @@ INITIALIZE_PASS(MarkAliasingLoadStore, DEBUG_TYPE,
 
 bool MarkAliasingLoadStore::insertMarker(MachineBasicBlock *MBB,
                                          MachineInstr *InsertBefore,
-                                         MachineInstr *LoadInst, const TargetRegisterInfo *TRI) {
+                                         MachineInstr *LoadInst,
+                                         const TargetRegisterInfo *TRI,
+                                         bool IsRISCV) {
   const TargetInstrInfo *TII = MBB->getParent()->getSubtarget().getInstrInfo();
   const DebugLoc &DL = InsertBefore->getDebugLoc();
   const unsigned Marker = TII->get(TargetOpcode::COPY).getOpcode();
-  const llvm::Register MarkerReg = findBaseRegister(LoadInst);
+  llvm::Register MarkerReg = findBaseRegister(LoadInst);
+  const llvm::Register ConstReg = findConstantRegister(TRI);
 
-  llvm::MachineInstrBuilder builder = BuildMI(*MBB, InsertBefore, DL, TII->get(Marker));
-
-  builder.addDef(MarkerReg, RegState::Renamable);
+  llvm::MachineInstrBuilder builder =
+      BuildMI(*MBB, InsertBefore, DL, TII->get(Marker));
+  if (IsRISCV)
+    builder.addDef(ConstReg);
+  else
+    builder.addDef(MarkerReg, RegState::Renamable);
   builder.addUse(MarkerReg);
-
 
   return true;
 }
@@ -140,7 +158,10 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
   MachineLoopInfo *MLI = &getAnalysis<MachineLoopInfo>();
   LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
-  const TargetRegisterInfo* TRI = MF.getSubtarget().getRegisterInfo();
+  const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+
+  const TargetSubtargetInfo &STI = MF.getSubtarget();
+  const bool IsRISCV = STI.getTargetTriple().isRISCV();
 
   llvm::errs() << "MarkAliasingLoadStore Pass\n";
   llvm::errs() << MF.getName() << "\n";
@@ -162,7 +183,8 @@ bool MarkAliasingLoadStore::runOnMachineFunction(MachineFunction &MF) {
       else
         llvm::errs() << "Distance: " << Distance << "\n";
 
-      insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
+      insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI,
+                   IsRISCV);
 
       llvm::errs() << "Aliasing load: " << *AliasingLoad;
 
@@ -197,7 +219,7 @@ AliasInformation MarkAliasingLoadStore::wrapComputeAliasDistance(
   auto [Distance, AliasingLoad] =
       computeAliasDistance(MachineInstrOrBlock{StoreInstr}, Visited,
                            PredDistanceMap, StoreInstr, MDT, MLI, AA, TII);
-                           
+
   if (AliasingLoad != nullptr) {
     const llvm::BasicBlock *BBFrom = AliasingLoad->getParent()->getBasicBlock();
 
