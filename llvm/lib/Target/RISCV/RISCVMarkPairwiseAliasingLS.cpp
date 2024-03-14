@@ -145,7 +145,17 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
       insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
 
       llvm::errs() << "Store: " << *Store << "\n";
+      DebugLoc StoreDL = Store->getDebugLoc();
+      StoreDL.print(llvm::errs());
+      llvm::errs() << "\n";
+      DebugLoc LoadDL = AliasingLoad->getDebugLoc();
       llvm::errs() << "AliasingLoad: " << *AliasingLoad << "\n";
+      LoadDL.print(llvm::errs());
+      llvm::errs() << "\n";
+      if (Store->getParent() != AliasingLoad->getParent()) {
+        llvm::errs() << "Different BB\n";
+      }
+      llvm::errs() << "==============================\n";
     }
   }
 
