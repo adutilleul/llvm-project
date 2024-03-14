@@ -1484,16 +1484,6 @@ bool MachineInstr::mustAlias(AAResults *AA, const MachineInstr &Other,
   if (TII->areMemAccessesTriviallyDisjoint(*this, Other))
     return false;
 
-  // Memory operations without memory operands may access anything. Be
-  // conservative and assume `MayAlias`.
-  if (memoperands_empty() || Other.memoperands_empty())
-    return true;
-
-  // Skip if there are too many memory operands.
-  auto NumChecks = getNumMemOperands() * Other.getNumMemOperands();
-  if (NumChecks > TII->getMemOperandAACheckLimit())
-    return true;
-
   // Check each pair of memory operands from both instructions, which can't
   // alias only if all pairs won't alias.
   for (auto *MMOa : memoperands())
