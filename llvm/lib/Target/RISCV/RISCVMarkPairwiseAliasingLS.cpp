@@ -137,12 +137,17 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
 
+  SmallPtrSet<const MachineInstr *, 4> MarkedInstr;
+
   for (MachineInstr *Store : findStores(MF)) {
     const AliasInformation AliasingLoad = computeAliasDistance(
         MachineInstrOrBlock{Store}, Store, MDT, MLI, AA, TII);
 
     if (AliasingLoad != nullptr) {
-      insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
+      if (!MarkedInstr.count(AliasingLoad)) {
+        insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
+        MarkedInstr.insert(AliasingLoad);
+      }
 
       llvm::errs() << "Store: " << *Store << "\n";
       DebugLoc StoreDL = Store->getDebugLoc();
