@@ -5,6 +5,7 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -21,14 +22,42 @@
 #include <limits>
 #include <optional>
 #include <tuple>
+#include <set>
 
 using namespace llvm;
 
 using MachineInstrOrBlock = std::variant<MachineInstr *, MachineBasicBlock *>;
-using AliasInformation = MachineInstr *;
+using MachineInstrOrBlockWithPred = std::tuple<MachineInstrOrBlock, MachineBasicBlock *>;
+using AliasInformation = std::tuple<MachineInstr *, BranchProbability>;
 
 constexpr unsigned int HINT_OPCODE = RISCV::SLLI;
 constexpr Register HINT_REG = RISCV::X0;
+
+// Atomic store instructions
+const std::set<unsigned int> ATOMICS_OPCODES = {
+    RISCV::LR_W, RISCV::LR_W_AQ, RISCV::LR_W_AQ_RL,
+    RISCV::LR_D, RISCV::LR_D_AQ, RISCV::LR_D_AQ_RL,
+    RISCV::SC_W, RISCV::SC_W_AQ, RISCV::SC_W_AQ_RL,
+    RISCV::SC_D, RISCV::SC_D_AQ, RISCV::SC_D_AQ_RL,
+    RISCV::AMOSWAP_W, RISCV::AMOSWAP_W_AQ, RISCV::AMOSWAP_W_AQ_RL,
+    RISCV::AMOSWAP_D, RISCV::AMOSWAP_D_AQ, RISCV::AMOSWAP_D_AQ_RL,
+    RISCV::AMOADD_W, RISCV::AMOADD_W_AQ, RISCV::AMOADD_W_AQ_RL,
+    RISCV::AMOADD_D, RISCV::AMOADD_D_AQ, RISCV::AMOADD_D_AQ_RL,
+    RISCV::AMOXOR_W, RISCV::AMOXOR_W_AQ, RISCV::AMOXOR_W_AQ_RL,
+    RISCV::AMOXOR_D, RISCV::AMOXOR_D_AQ, RISCV::AMOXOR_D_AQ_RL,
+    RISCV::AMOAND_W, RISCV::AMOAND_W_AQ, RISCV::AMOAND_W_AQ_RL,
+    RISCV::AMOAND_D, RISCV::AMOAND_D_AQ, RISCV::AMOAND_D_AQ_RL,
+    RISCV::AMOOR_W, RISCV::AMOOR_W_AQ, RISCV::AMOOR_W_AQ_RL,
+    RISCV::AMOOR_D, RISCV::AMOOR_D_AQ, RISCV::AMOOR_D_AQ_RL,
+    RISCV::AMOMIN_W, RISCV::AMOMIN_W_AQ, RISCV::AMOMIN_W_AQ_RL,
+    RISCV::AMOMIN_D, RISCV::AMOMIN_D_AQ, RISCV::AMOMIN_D_AQ_RL,
+    RISCV::AMOMAX_W, RISCV::AMOMAX_W_AQ, RISCV::AMOMAX_W_AQ_RL,
+    RISCV::AMOMAX_D, RISCV::AMOMAX_D_AQ, RISCV::AMOMAX_D_AQ_RL,
+    RISCV::AMOMINU_W, RISCV::AMOMINU_W_AQ, RISCV::AMOMINU_W_AQ_RL,
+    RISCV::AMOMINU_D, RISCV::AMOMINU_D_AQ, RISCV::AMOMINU_D_AQ_RL,
+    RISCV::AMOMAXU_W, RISCV::AMOMAXU_W_AQ, RISCV::AMOMAXU_W_AQ_RL,
+    RISCV::AMOMAXU_D, RISCV::AMOMAXU_D_AQ, RISCV::AMOMAXU_D_AQ_RL 
+};
 
 #define RISCV_MARK_PAIRWISE_ALIASING_LS_NAME                                   \
   "RISC-V Mark Pairwise Aliasing LS pass"
@@ -63,6 +92,7 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
                                         const MachineDominatorTree *MDT,
                                         const MachineLoopInfo *MLI,
                                         AAResults *AA,
+                                        const MachineBranchProbabilityInfo *MBPI,
                                         const TargetInstrInfo *TII);
 
   llvm::Register findBaseRegister(MachineInstr *MI) {
@@ -74,6 +104,10 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
     return 0;
   }
 
+  bool isAtomic(MachineInstr *MI) {
+    return ATOMICS_OPCODES.count(MI->getOpcode());
+  }
+
   bool runOnMachineFunction(MachineFunction &Fn) override;
 
   StringRef getPassName() const override {
@@ -82,6 +116,7 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineDominatorTree>();
+    AU.addRequired<MachineBranchProbabilityInfo>();
     AU.addRequired<MachinePostDominatorTree>();
     AU.addRequired<AAResultsWrapperPass>();
     AU.addRequired<MachineLoopInfo>();
@@ -136,31 +171,37 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
   MachineLoopInfo *MLI = &getAnalysis<MachineLoopInfo>();
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
-
+  const MachineBranchProbabilityInfo* MBPI = &getAnalysis<MachineBranchProbabilityInfo>();
   SmallPtrSet<const MachineInstr *, 4> MarkedInstr;
 
   for (MachineInstr *Store : findStores(MF)) {
-    const AliasInformation AliasingLoad = computeAliasDistance(
-        MachineInstrOrBlock{Store}, Store, MDT, MLI, AA, TII);
+    const auto [AliasingLoad, BranchProbability] = computeAliasDistance(
+        MachineInstrOrBlock{Store}, Store, MDT, MLI, AA, MBPI, TII); 
+
+    // don't annotate atomic stores for RISC-V
+    if (isAtomic(Store)) {
+      continue;
+    }
 
     if (AliasingLoad != nullptr) {
       if (!MarkedInstr.count(AliasingLoad)) {
         insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
         MarkedInstr.insert(AliasingLoad);
-      }
 
-      llvm::errs() << "Store: " << *Store << "\n";
-      DebugLoc StoreDL = Store->getDebugLoc();
-      StoreDL.print(llvm::errs());
-      llvm::errs() << "\n";
-      DebugLoc LoadDL = AliasingLoad->getDebugLoc();
-      llvm::errs() << "AliasingLoad: " << *AliasingLoad << "\n";
-      LoadDL.print(llvm::errs());
-      llvm::errs() << "\n";
-      if (Store->getParent() != AliasingLoad->getParent()) {
-        llvm::errs() << "Different BB\n";
+        llvm::errs() << "Store: " << *Store << "\n";
+        DebugLoc StoreDL = Store->getDebugLoc();
+        StoreDL.print(llvm::errs());
+        llvm::errs() << "\n";
+        DebugLoc LoadDL = AliasingLoad->getDebugLoc();
+        llvm::errs() << "AliasingLoad: " << *AliasingLoad << "\n";
+        LoadDL.print(llvm::errs());
+        llvm::errs() << "\n";
+        llvm::errs() << "Branch Probability: " << BranchProbability << "\n";
+        if (Store->getParent() != AliasingLoad->getParent()) {
+          llvm::errs() << "Different BB\n";
+        }
+        llvm::errs() << "==============================\n";
       }
-      llvm::errs() << "==============================\n";
     }
   }
 
@@ -170,25 +211,30 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
 AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
     MachineInstrOrBlock InstrOrBlock, const MachineInstr *StoreInstr,
     const MachineDominatorTree *MDT, const MachineLoopInfo *MLI, AAResults *AA,
+    const MachineBranchProbabilityInfo *MBPI,
     const TargetInstrInfo *TII) {
 
   MachineInstr *AliasingLoad = nullptr;
 
-  SmallVector<MachineInstrOrBlock, 8> WorkList;
-  WorkList.push_back(InstrOrBlock);
+  SmallVector<MachineInstrOrBlockWithPred, 8> WorkList;
+  WorkList.push_back(MachineInstrOrBlockWithPred{InstrOrBlock, nullptr});
   SmallPtrSet<MachineBasicBlock *, 4> VisitedMBB;
 
   do {
-    MachineInstrOrBlock CurrentInstrOrBlock = WorkList.pop_back_val();
+    auto [CurrentInstrOrBlock, CurrentSucc] = WorkList.pop_back_val();
 
     const bool IsInstr =
         std::holds_alternative<MachineInstr *>(CurrentInstrOrBlock);
     MachineBasicBlock *MBB = nullptr;
+    bool HasEncounteredCallOrAtomic = false;
 
     if (IsInstr) {
       MachineInstr *CurrentBlockInstr =
           std::get<MachineInstr *>(CurrentInstrOrBlock);
       MBB = CurrentBlockInstr->getParent();
+
+      const bool MBBDominatesStore =
+          MDT->dominates(MBB, StoreInstr->getParent());
 
       auto IsInstructionMatch = [&](MachineInstr const *I) {
         bool HasMemOp = !I->memoperands_empty();
@@ -197,13 +243,32 @@ AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
 
       for (auto &I : make_range(CurrentBlockInstr->getReverseIterator(),
                                 CurrentBlockInstr->getParent()->instr_rend())) {
+
+        // If this block dominates the store, we can stop looking for loads
+        // whenever we encounter a call or an atomic instruction.
+        if (MBBDominatesStore) {
+          if(I.isCall() || isAtomic(&I)) {
+            HasEncounteredCallOrAtomic = true;
+            break;
+          }
+        }
+
         if (IsInstructionMatch(&I)) {
           AliasingLoad = &I;
-          return AliasingLoad;
+          const auto Succ = find(I.getParent()->successors(), CurrentSucc);
+          if(Succ != I.getParent()->succ_end()) {
+            return {AliasingLoad, MBPI->getEdgeProbability(I.getParent(), *Succ)};
+          }
+
+          return {AliasingLoad, BranchProbability::getUnknown()};
         }
       }
     } else {
       MBB = std::get<MachineBasicBlock *>(CurrentInstrOrBlock);
+    }
+
+    if (HasEncounteredCallOrAtomic) {
+      continue;
     }
 
     const MachineLoop *CurLoop = MLI->getLoopFor(MBB);
@@ -216,16 +281,16 @@ AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
         VisitedMBB.insert(Pred);
 
         const bool HasAnyInstr = !Pred->empty();
-        const MachineInstrOrBlock LastInstr =
-            HasAnyInstr ? MachineInstrOrBlock{&Pred->back()}
-                        : MachineInstrOrBlock{Pred};
+        const MachineInstrOrBlockWithPred LastInstr =
+            HasAnyInstr ? MachineInstrOrBlockWithPred{MachineInstrOrBlock{&Pred->back()}, MBB}
+                        : MachineInstrOrBlockWithPred{MachineInstrOrBlock{Pred}, MBB};
 
         WorkList.push_back(LastInstr);
       }
     }
   } while (!WorkList.empty());
 
-  return AliasingLoad;
+  return {AliasingLoad, BranchProbability::getUnknown()};
 }
 
 FunctionPass *llvm::createRISCVMarkPairwiseAliasingLSPass() {
