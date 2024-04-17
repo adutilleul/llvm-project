@@ -27,8 +27,14 @@
 using namespace llvm;
 
 using MachineInstrOrBlock = std::variant<MachineInstr *, MachineBasicBlock *>;
-using MachineInstrOrBlockWithPred = std::tuple<MachineInstrOrBlock, MachineBasicBlock *>;
+using BranchingSuccs = SmallPtrSet<const MachineBasicBlock *, 4>;
+using MachineInstrOrBlockWithSucc = std::tuple<MachineInstrOrBlock, BranchingSuccs>;
 using AliasInformation = std::tuple<MachineInstr *, BranchProbability>;
+
+static cl::opt<unsigned> LoadExclusiveHintThreshold(
+    "riscv-load-exclusive-hint-threshold", cl::Hidden,
+    cl::desc("Threshold for adding hints to load-exclusive instruction (default=51)"),
+    cl::init(51));
 
 constexpr unsigned int HINT_OPCODE = RISCV::SLLI;
 constexpr Register HINT_REG = RISCV::X0;
@@ -174,6 +180,8 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
   const MachineBranchProbabilityInfo* MBPI = &getAnalysis<MachineBranchProbabilityInfo>();
   SmallPtrSet<const MachineInstr *, 4> MarkedInstr;
 
+  const BranchProbability hotThreshold(LoadExclusiveHintThreshold, 100);
+
   for (MachineInstr *Store : findStores(MF)) {
     const auto [AliasingLoad, BranchProbability] = computeAliasDistance(
         MachineInstrOrBlock{Store}, Store, MDT, MLI, AA, MBPI, TII); 
@@ -184,9 +192,14 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
     }
 
     if (AliasingLoad != nullptr) {
+      bool isEdgeHot = (!BranchProbability.isUnknown() && BranchProbability >= hotThreshold)
+                        || BranchProbability.isUnknown();
+
       if (!MarkedInstr.count(AliasingLoad)) {
-        insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
-        MarkedInstr.insert(AliasingLoad);
+        if(isEdgeHot) {
+          insertMarker(AliasingLoad->getParent(), AliasingLoad, AliasingLoad, TRI);
+          MarkedInstr.insert(AliasingLoad);
+        }
 
         llvm::errs() << "Store: " << *Store << "\n";
         DebugLoc StoreDL = Store->getDebugLoc();
@@ -200,6 +213,8 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
         if (Store->getParent() != AliasingLoad->getParent()) {
           llvm::errs() << "Different BB\n";
         }
+        llvm::errs() << "Is edge hot: " << isEdgeHot << "\n";
+
         llvm::errs() << "==============================\n";
       }
     }
@@ -216,8 +231,8 @@ AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
 
   MachineInstr *AliasingLoad = nullptr;
 
-  SmallVector<MachineInstrOrBlockWithPred, 8> WorkList;
-  WorkList.push_back(MachineInstrOrBlockWithPred{InstrOrBlock, nullptr});
+  SmallVector<MachineInstrOrBlockWithSucc, 8> WorkList;
+  WorkList.push_back(MachineInstrOrBlockWithSucc{InstrOrBlock, BranchingSuccs()});
   SmallPtrSet<MachineBasicBlock *, 4> VisitedMBB;
 
   do {
@@ -238,7 +253,7 @@ AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
 
       auto IsInstructionMatch = [&](MachineInstr const *I) {
         bool HasMemOp = !I->memoperands_empty();
-        return HasMemOp && I->mayLoad() && I->mustAlias(AA, *StoreInstr, false);
+        return HasMemOp && I->mayLoad() && (I->mustAlias(AA, *StoreInstr, false) || I->partialAlias(AA, *StoreInstr, false));
       };
 
       for (auto &I : make_range(CurrentBlockInstr->getReverseIterator(),
@@ -255,12 +270,26 @@ AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
 
         if (IsInstructionMatch(&I)) {
           AliasingLoad = &I;
-          const auto Succ = find(I.getParent()->successors(), CurrentSucc);
-          if(Succ != I.getParent()->succ_end()) {
-            return {AliasingLoad, MBPI->getEdgeProbability(I.getParent(), *Succ)};
+          auto Prob = CurrentSucc.empty() ? BranchProbability::getOne() : BranchProbability::getUnknown();
+          for (const MachineBasicBlock *Succ : CurrentSucc) {
+            auto BranchProb = MBPI->getEdgeProbability(I.getParent(), Succ);
+
+            if(!BranchProb.isUnknown())
+              if(Prob.isUnknown()) {
+                Prob = BranchProb;
+              }
+              else {
+                Prob = Prob * BranchProb;
+                assert(Prob <= BranchProbability::getOne() && "Probability overflow");
+              }
+            else {
+              Prob = BranchProbability::getUnknown();
+              break;
+            }
           }
 
-          return {AliasingLoad, BranchProbability::getUnknown()};
+
+          return {AliasingLoad, Prob};
         }
       }
     } else {
@@ -281,9 +310,12 @@ AliasInformation RISCVMarkPairwiseAliasingLS::computeAliasDistance(
         VisitedMBB.insert(Pred);
 
         const bool HasAnyInstr = !Pred->empty();
-        const MachineInstrOrBlockWithPred LastInstr =
-            HasAnyInstr ? MachineInstrOrBlockWithPred{MachineInstrOrBlock{&Pred->back()}, MBB}
-                        : MachineInstrOrBlockWithPred{MachineInstrOrBlock{Pred}, MBB};
+        if(MDT->dominates(MBB, StoreInstr->getParent())) {
+          CurrentSucc.insert(MBB);
+        }
+        const MachineInstrOrBlockWithSucc LastInstr =
+            HasAnyInstr ? MachineInstrOrBlockWithSucc{MachineInstrOrBlock{&Pred->back()}, CurrentSucc}
+                        : MachineInstrOrBlockWithSucc{MachineInstrOrBlock{Pred}, CurrentSucc};
 
         WorkList.push_back(LastInstr);
       }

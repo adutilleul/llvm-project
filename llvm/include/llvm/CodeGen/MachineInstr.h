@@ -1719,6 +1719,18 @@ public:
   /// @param UseTBAA Whether to pass TBAA information to alias analysis.
   bool mustAlias(AAResults *AA, const MachineInstr &Other, bool UseTBAA) const;
 
+  /// Returns true if this instruction's memory access aliases the memory
+  /// access of Other.
+  //
+  /// Assumes any physical registers used to compute addresses
+  /// have the same value for both instructions.  Returns false if neither
+  /// instruction writes to memory.
+  ///
+  /// @param AA Optional alias analysis, used to compare memory operands.
+  /// @param Other MachineInstr to check aliasing against.
+  /// @param UseTBAA Whether to pass TBAA information to alias analysis.
+  bool partialAlias(AAResults *AA, const MachineInstr &Other, bool UseTBAA) const;
+
   /// Return true if this instruction may have an ordered
   /// or volatile memory reference, or if the information describing the memory
   /// reference is not available. Return false if it is known to have no
