@@ -516,6 +516,11 @@ void RISCVPassConfig::addPreEmitPass2() {
     // ensuring return instruction is detected correctly.
     addPass(createRISCVPushPopOptimizationPass());
   }
+
+  // Add hints to load-exclusive instructions.
+  if (EnableLoadExclusiveHint)
+    addPass(createRISCVMarkPairwiseAliasingLSPass());
+
   addPass(createRISCVExpandPseudoPass());
 
   // Schedule the expansion of AMOs at the last possible moment, avoiding the
@@ -564,8 +569,6 @@ void RISCVPassConfig::addPostRegAlloc() {
   if (TM->getOptLevel() != CodeGenOptLevel::None &&
       EnableRedundantCopyElimination)
     addPass(createRISCVRedundantCopyEliminationPass());
-  if (EnableLoadExclusiveHint)
-    addPass(createRISCVMarkPairwiseAliasingLSPass());
 }
 
 yaml::MachineFunctionInfo *

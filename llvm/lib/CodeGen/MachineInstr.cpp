@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -1418,7 +1419,7 @@ static bool MemOperandsHaveMustAlias(const MachineFrameInfo &MFI, AAResults *AA,
 
 static bool MemOperandsHavePartialAlias(const MachineFrameInfo &MFI, AAResults *AA,
                                  bool UseTBAA, const MachineMemOperand *MMOa,
-                                 const MachineMemOperand *MMOb) {
+                                 const MachineMemOperand *MMOb, size_t CacheLineSize) {
   // The following interface to AA is fashioned after DAGCombiner::isAlias and
   // operates with MachineMemOperand offset with some important assumptions:
   //   - LLVM fundamentally assumes flat address spaces.
@@ -1436,10 +1437,8 @@ static bool MemOperandsHavePartialAlias(const MachineFrameInfo &MFI, AAResults *
   int64_t OffsetB = MMOb->getOffset();
   int64_t MinOffset = std::min(OffsetA, OffsetB);
 
-  uint64_t WidthA = MMOa->getSize();
-  uint64_t WidthB = MMOb->getSize();
-  bool KnownWidthA = WidthA != MemoryLocation::UnknownSize;
-  bool KnownWidthB = WidthB != MemoryLocation::UnknownSize;
+  uint64_t WidthA = CacheLineSize;
+  uint64_t WidthB = CacheLineSize;
 
   const Value *ValA = MMOa->getValue();
   const Value *ValB = MMOb->getValue();
@@ -1456,8 +1455,6 @@ static bool MemOperandsHavePartialAlias(const MachineFrameInfo &MFI, AAResults *
   }
 
   if (SameVal) {
-    if (!KnownWidthA || !KnownWidthB)
-      return false;
     int64_t MaxOffset = std::max(OffsetA, OffsetB);
     int64_t LowWidth = (MinOffset == OffsetA) ? WidthA : WidthB;
     return (MinOffset + LowWidth > MaxOffset);
@@ -1472,10 +1469,8 @@ static bool MemOperandsHavePartialAlias(const MachineFrameInfo &MFI, AAResults *
   assert((OffsetA >= 0) && "Negative MachineMemOperand offset");
   assert((OffsetB >= 0) && "Negative MachineMemOperand offset");
 
-  int64_t OverlapA =
-      KnownWidthA ? WidthA + OffsetA - MinOffset : MemoryLocation::UnknownSize;
-  int64_t OverlapB =
-      KnownWidthB ? WidthB + OffsetB - MinOffset : MemoryLocation::UnknownSize;
+  int64_t OverlapA = WidthA + OffsetA - MinOffset;
+  int64_t OverlapB = WidthB + OffsetB - MinOffset;
 
   return AA->alias(
       MemoryLocation(ValA, OverlapA, UseTBAA ? MMOa->getAAInfo() : AAMDNodes()),
@@ -1566,6 +1561,10 @@ bool MachineInstr::partialAlias(AAResults *AA, const MachineInstr &Other,
   const MachineFunction *MF = getMF();
   const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
   const MachineFrameInfo &MFI = MF->getFrameInfo();
+  const TargetTransformInfo &TTI = MF->getTarget().getTargetTransformInfo(MF->getFunction());
+  size_t CacheLineSize = TTI.getCacheLineSize();
+  if (CacheLineSize == 0)
+    CacheLineSize = 64;  
 
   // Exclude call instruction which may alter the memory but can not be handled
   // by this function.
@@ -1581,15 +1580,11 @@ bool MachineInstr::partialAlias(AAResults *AA, const MachineInstr &Other,
   if (!mayLoadOrStore() || !Other.mayLoadOrStore())
     return false;
 
-  // Let the target decide if memory accesses cannot possibly overlap.
-  if (TII->areMemAccessesTriviallyDisjoint(*this, Other))
-    return false;
-
   // Check each pair of memory operands from both instructions, which can't
   // alias only if all pairs won't alias.
   for (auto *MMOa : memoperands())
     for (auto *MMOb : Other.memoperands())
-      if (MemOperandsHavePartialAlias(MFI, AA, UseTBAA, MMOa, MMOb))
+      if (MemOperandsHavePartialAlias(MFI, AA, UseTBAA, MMOa, MMOb, CacheLineSize))
         return true;
 
   return false;
