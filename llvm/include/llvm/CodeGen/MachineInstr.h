@@ -1731,6 +1731,9 @@ public:
   /// @param UseTBAA Whether to pass TBAA information to alias analysis.
   bool partialAlias(AAResults *AA, const MachineInstr &Other, bool UseTBAA) const;
 
+  /// Returns true if this instruction's access exactly the same value and offset
+  bool useSameMemoryRef(const MachineInstr &Other) const;
+
   /// Return true if this instruction may have an ordered
   /// or volatile memory reference, or if the information describing the memory
   /// reference is not available. Return false if it is known to have no

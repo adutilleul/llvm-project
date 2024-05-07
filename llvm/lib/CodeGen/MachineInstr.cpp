@@ -1283,6 +1283,20 @@ bool MachineInstr::isSafeToMove(AAResults *AA, bool &SawStore) const {
   return true;
 }
 
+static bool MemOperandsAreSame(const MachineFrameInfo &MFI, const MachineMemOperand *MMOa,
+                                 const MachineMemOperand *MMOb) {
+  int64_t OffsetA = MMOa->getOffset();
+  int64_t OffsetB = MMOb->getOffset();
+
+  const Value *ValA = MMOa->getValue();
+  const Value *ValB = MMOb->getValue();
+
+  if (ValA && ValB && (ValA == ValB))
+    return OffsetA == OffsetB;
+
+  return false;
+}
+
 static bool MemOperandsHaveAlias(const MachineFrameInfo &MFI, AAResults *AA,
                                  bool UseTBAA, const MachineMemOperand *MMOa,
                                  const MachineMemOperand *MMOb) {
@@ -1585,6 +1599,21 @@ bool MachineInstr::partialAlias(AAResults *AA, const MachineInstr &Other,
   for (auto *MMOa : memoperands())
     for (auto *MMOb : Other.memoperands())
       if (MemOperandsHavePartialAlias(MFI, AA, UseTBAA, MMOa, MMOb, CacheLineSize))
+        return true;
+
+  return false;
+}
+
+bool MachineInstr::useSameMemoryRef(const MachineInstr &Other) const {
+  if (memoperands_empty() || Other.memoperands_empty())
+    return false;
+
+  const MachineFunction *MF = getMF();
+  const MachineFrameInfo &MFI = MF->getFrameInfo();
+
+  for (auto *MMOa : memoperands())
+    for (auto *MMOb : Other.memoperands())
+      if (MemOperandsAreSame(MFI, MMOa, MMOb))
         return true;
 
   return false;
