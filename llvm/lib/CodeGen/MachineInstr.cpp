@@ -1486,10 +1486,11 @@ static bool MemOperandsHavePartialAlias(const MachineFrameInfo &MFI, AAResults *
   int64_t OverlapA = WidthA + OffsetA - MinOffset;
   int64_t OverlapB = WidthB + OffsetB - MinOffset;
 
-  return AA->alias(
+  auto Alias = AA->alias(
       MemoryLocation(ValA, OverlapA, UseTBAA ? MMOa->getAAInfo() : AAMDNodes()),
       MemoryLocation(ValB, OverlapB,
-                     UseTBAA ? MMOb->getAAInfo() : AAMDNodes())) == AliasResult::PartialAlias;
+                     UseTBAA ? MMOb->getAAInfo() : AAMDNodes()));
+  return Alias == AliasResult::PartialAlias || Alias == AliasResult::MustAlias;
 }
 
 bool MachineInstr::mayAlias(AAResults *AA, const MachineInstr &Other,
@@ -1571,14 +1572,11 @@ bool MachineInstr::mustAlias(AAResults *AA, const MachineInstr &Other,
 }
 
 bool MachineInstr::partialAlias(AAResults *AA, const MachineInstr &Other,
-                            bool UseTBAA) const {
+                            bool UseTBAA, size_t CacheLineWindow) const {
   const MachineFunction *MF = getMF();
   const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
   const MachineFrameInfo &MFI = MF->getFrameInfo();
   const TargetTransformInfo &TTI = MF->getTarget().getTargetTransformInfo(MF->getFunction());
-  size_t CacheLineSize = TTI.getCacheLineSize();
-  if (CacheLineSize == 0)
-    CacheLineSize = 64;  
 
   // Exclude call instruction which may alter the memory but can not be handled
   // by this function.
@@ -1598,7 +1596,7 @@ bool MachineInstr::partialAlias(AAResults *AA, const MachineInstr &Other,
   // alias only if all pairs won't alias.
   for (auto *MMOa : memoperands())
     for (auto *MMOb : Other.memoperands())
-      if (MemOperandsHavePartialAlias(MFI, AA, UseTBAA, MMOa, MMOb, CacheLineSize))
+      if (MemOperandsHavePartialAlias(MFI, AA, UseTBAA, MMOa, MMOb, CacheLineWindow))
         return true;
 
   return false;

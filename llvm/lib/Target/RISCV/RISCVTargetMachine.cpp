@@ -517,16 +517,16 @@ void RISCVPassConfig::addPreEmitPass2() {
     addPass(createRISCVPushPopOptimizationPass());
   }
 
-  // Add hints to load-exclusive instructions.
-  if (EnableLoadExclusiveHint)
-    addPass(createRISCVMarkPairwiseAliasingLSPass());
-
   addPass(createRISCVExpandPseudoPass());
 
   // Schedule the expansion of AMOs at the last possible moment, avoiding the
   // possibility for other passes to break the requirements for forward
   // progress in the LR/SC block.
   addPass(createRISCVExpandAtomicPseudoPass());
+
+  // Add hints to load-exclusive instructions.
+  if (EnableLoadExclusiveHint)
+    addPass(createRISCVMarkPairwiseAliasingLSPass());
 
   // KCFI indirect call checks are lowered to a bundle.
   addPass(createUnpackMachineBundles([&](const MachineFunction &MF) {

@@ -1729,7 +1729,7 @@ public:
   /// @param AA Optional alias analysis, used to compare memory operands.
   /// @param Other MachineInstr to check aliasing against.
   /// @param UseTBAA Whether to pass TBAA information to alias analysis.
-  bool partialAlias(AAResults *AA, const MachineInstr &Other, bool UseTBAA) const;
+  bool partialAlias(AAResults *AA, const MachineInstr &Other, bool UseTBAA, size_t CacheLineWindow) const;
 
   /// Returns true if this instruction's access exactly the same value and offset
   bool useSameMemoryRef(const MachineInstr &Other) const;
