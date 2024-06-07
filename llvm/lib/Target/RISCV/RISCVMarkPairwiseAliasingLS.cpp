@@ -2,10 +2,12 @@
 #include "RISCVMachineFunctionInfo.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -18,8 +20,6 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/InitializePasses.h"
-#include "llvm/ADT/Statistic.h"
-#include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 
 #include <limits>
 #include <optional>
@@ -53,14 +53,16 @@ struct AliasInfo {
 using MachineInstrOrBlock = std::variant<MachineInstr *, MachineBasicBlock *>;
 
 using MachineInstrOrBlockWithSucc =
-    std::tuple<MachineInstrOrBlock, BranchingSuccs, const MachineBasicBlock*>;
+    std::tuple<MachineInstrOrBlock, BranchingSuccs, const MachineBasicBlock *>;
 using AliasInformation = std::tuple<MachineInstr *, AliasInfo>;
 using AliasInformations = SmallVector<AliasInformation, 4>;
-using AliasInformationsMap = SmallMapVector<MachineInstr *, AliasInformations, 4>;
+using AliasInformationsMap =
+    SmallMapVector<MachineInstr *, AliasInformations, 4>;
 using AliasFuncType =
     std::function<AliasType(MachineInstr const &StoreI, const MachineInstr *)>;
 using StoreInfo = std::tuple<AliasInfo, MachineInstr *>;
-using LoadToStoresMap = SmallMapVector<llvm::MachineInstr*, SmallVector<StoreInfo, 4>, 4>;
+using LoadToStoresMap =
+    SmallMapVector<llvm::MachineInstr *, SmallVector<StoreInfo, 4>, 4>;
 
 static cl::opt<unsigned> LoadExclusiveHintThreshold(
     "riscv-load-exclusive-hint-threshold", cl::Hidden,
@@ -95,6 +97,11 @@ static cl::opt<bool> EnableBranchProb(
     cl::desc("Enable branch probability computation (default=false)"),
     cl::init(false));
 
+static cl::opt<bool> EnableVerboseLogging(
+    "riscv-load-exclusive-hint-verbose", cl::Hidden,
+    cl::desc("Enable verbose logging"),
+    cl::init(false));
+
 #define DEBUG_TYPE "RISCVMarkPairwiseAliasingLS"
 STATISTIC(NumPairsMustAlias,
           "Number of hints instructions detected using Must Alias");
@@ -114,9 +121,9 @@ constexpr unsigned int HINT_OPCODE = RISCV::SLLI;
 constexpr Register HINT_REG = RISCV::X0;
 
 // Atomic store instructions
-// Beware that this does not include pseudo-atomics instructions (e.g: PseudoCmpXchg64) that 
-// have not been expanded yet
-// Thus the pass must be ran after the expansion of pseudo-atomics or this needs to be updated
+// Beware that this does not include pseudo-atomics instructions (e.g:
+// PseudoCmpXchg64) that have not been expanded yet Thus the pass must be ran
+// after the expansion of pseudo-atomics or this needs to be updated
 const std::set<unsigned int> ATOMICS_OPCODES = {
     RISCV::LR_W,      RISCV::LR_W_AQ,      RISCV::LR_W_AQ_RL,
     RISCV::LR_D,      RISCV::LR_D_AQ,      RISCV::LR_D_AQ_RL,
@@ -194,9 +201,11 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
 
   size_t insertHints(AliasInformations &AliasInfos, MachineInstr *Store,
                      SmallPtrSet<const MachineInstr *, 4> &MarkedInstr,
-                    LoadToStoresMap &LoadToStoreMap,
-                     const TargetRegisterInfo *TRI, const MachineBranchProbabilityInfo *MBPI,
-                    const MachineBlockFrequencyInfo *MBFI) {
+                     LoadToStoresMap &LoadToStoreMap,
+                     const TargetRegisterInfo *TRI,
+                     const MachineBranchProbabilityInfo *MBPI,
+                     const MachineLoopInfo *MLI,
+                     const MachineBlockFrequencyInfo *MBFI) {
     const BranchProbability hotThreshold(LoadExclusiveHintThreshold, 100);
 
     SmallPtrSet<const MachineInstr *, 4> MarkedLinkedStores;
@@ -208,8 +217,7 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
       }
 
       // hint furthest load
-      if(EnableHintFurthest && MarkedLinkedStores.count(Store))
-      {
+      if (EnableHintFurthest && MarkedLinkedStores.count(Store)) {
         continue;
       }
 
@@ -221,42 +229,43 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
 
       if (AliasingLoad != nullptr) {
         bool IsEdgeHot = (!AliasInfo.BranchProb.isUnknown() &&
-                          AliasInfo.BranchProb >= hotThreshold) ||
+                          AliasInfo.BranchProb > hotThreshold) ||
                          AliasInfo.BranchProb.isUnknown();
 
         // Already annotated
         if (!MarkedInstr.count(AliasingLoad)) {
-          llvm::errs() << "==============================\n";
-          llvm::errs() << "Store: " << *Store << "\n";
-          DebugLoc StoreDL = Store->getDebugLoc();
-          StoreDL.print(llvm::errs());
-          llvm::errs() << "\n";
-          DebugLoc LoadDL = AliasingLoad->getDebugLoc();
-          llvm::errs() << "AliasingLoad: " << *AliasingLoad << "\n";
-          LoadDL.print(llvm::errs());
-          llvm::errs() << "\n";
-          if (Store->getParent() != AliasingLoad->getParent()) {
-            llvm::errs() << "Different BB\n";
-          }
-          if (AliasInfo.Type == AliasType::MustAlias) {
-            llvm::errs() << "Must Alias\n";
-          } else if (AliasInfo.Type == AliasType::CacheLineAlias) {
-            llvm::errs() << "Cache Line Alias\n";
-          } else if (AliasInfo.Type == AliasType::MayAlias) {
-            llvm::errs() << "May Alias\n";
-          }
+          if(EnableVerboseLogging) {
+            llvm::errs() << "==============================\n";
+            llvm::errs() << "Store: " << *Store << "\n";
+            DebugLoc StoreDL = Store->getDebugLoc();
+            StoreDL.print(llvm::errs());
+            llvm::errs() << "\n";
+            DebugLoc LoadDL = AliasingLoad->getDebugLoc();
+            llvm::errs() << "AliasingLoad: " << *AliasingLoad << "\n";
+            LoadDL.print(llvm::errs());
+            llvm::errs() << "\n";
+            if (Store->getParent() != AliasingLoad->getParent()) {
+              llvm::errs() << "Different BB\n";
+            }
+            if (AliasInfo.Type == AliasType::MustAlias) {
+              llvm::errs() << "Must Alias\n";
+            } else if (AliasInfo.Type == AliasType::CacheLineAlias) {
+              llvm::errs() << "Cache Line Alias\n";
+            } else if (AliasInfo.Type == AliasType::MayAlias) {
+              llvm::errs() << "May Alias\n";
+            }
 
-          llvm::errs() << "Control Dependencies: (cardinality: "
-                       << AliasInfo.ControlDeps.size() << ")\n";
-          for (auto [U, V] : AliasInfo.ControlDeps) {
-            const auto prob = MBPI->getEdgeProbability(U, V);
-            DebugLoc UDL = U->getFirstNonDebugInstr()->getDebugLoc();
-            DebugLoc VDL = V->getFirstNonDebugInstr()->getDebugLoc();
-            llvm::errs() << "Control Dependent: ";
-            UDL.print(llvm::errs());
-            llvm::errs() << " -> ";
-            VDL.print(llvm::errs());
-            llvm::errs() << " with probability: " << prob << "\n";
+            llvm::errs() << "Control Dependencies: (cardinality: "
+                        << AliasInfo.ControlDeps.size() << ")\n";
+            for (auto [U, V] : AliasInfo.ControlDeps) {
+              const auto prob = MBPI->getEdgeProbability(U, V);
+              auto PredInstr = U->getLastNonDebugInstr();
+              auto SuccInstr = V->getLastNonDebugInstr();
+              llvm::errs() << "Control Dependent: ";
+              llvm::errs() << "Pred: " << *PredInstr << " -> Succ: " << *SuccInstr
+                          << " with probability: " << prob << "\n";
+              // llvm::errs() << " with probability: " << prob << "\n";
+            }
           }
 
           auto &Stores = LoadToStoreMap[AliasingLoad];
@@ -267,28 +276,60 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
               continue;
             }
 
-            llvm::errs() << "Other Store: " << *CurStore << " -> Probability: "
-                         << AI.BranchProb << "\n";
+            if(EnableVerboseLogging) {
+              llvm::errs() << "Other Store: " << *CurStore
+                          << " -> Probability: " << AI.BranchProb << "\n";
 
-            // print control deps
-            llvm::errs() << "Control Dependencies Linked: (cardinality: "
-                         << AI.ControlDeps.size() << ")\n";
-            for (auto [U, V] : AI.ControlDeps) {
-              DebugLoc UDL = U->getFirstNonDebugInstr()->getDebugLoc();
-              DebugLoc VDL = V->getFirstNonDebugInstr()->getDebugLoc();
-              llvm::errs() << "Control Dependent Linked: ";
-              UDL.print(llvm::errs());
-              llvm::errs() << " -> ";
-              VDL.print(llvm::errs());
-              llvm::errs() << "\n";
+              // print control deps
+              llvm::errs() << "Control Dependencies Linked: (cardinality: "
+                          << AI.ControlDeps.size() << ")\n";
             }
 
-            TotalProb += AI.BranchProb;                      
+            for (auto [U, V] : AI.ControlDeps) {
+              if(EnableVerboseLogging) {
+                DebugLoc UDL = U->getFirstNonDebugInstr()->getDebugLoc();
+                DebugLoc VDL = V->getFirstNonDebugInstr()->getDebugLoc();
+                llvm::errs() << "Control Dependent Linked: ";
+                UDL.print(llvm::errs());
+                llvm::errs() << " -> ";
+                VDL.print(llvm::errs());
+                llvm::errs() << "\n";
+              }
+            }
+
+            TotalProb += AI.BranchProb;
           }
 
-          llvm::errs() << "Branch Probability: " << TotalProb << "\n";
+          const MachineLoop *StoreLoop = MLI->getLoopFor(Store->getParent());
+          const MachineLoop *LoadLoop =
+              MLI->getLoopFor(AliasingLoad->getParent());
 
-          if(TotalProb > hotThreshold && !IsEdgeHot) {
+          // bool SameLoopSCC = StoreLoop && LoadLoop &&
+          //                   StoreLoop->getParentLoop() ==
+          //                   LoadLoop->getParentLoop();
+
+          // case
+          if (LoadLoop && !StoreLoop) {
+            continue;
+          }
+
+          if (StoreLoop && EnableVerboseLogging) {
+            llvm::errs() << "Store Loop: " << StoreLoop << "\n";
+          }
+
+          if (LoadLoop && EnableVerboseLogging) {
+            llvm::errs() << "Load Loop: " << LoadLoop << "\n";
+          }
+
+          // if (StoreLoop && LoadStore && SameLoopSCC &&
+          // StoreLoop->getLoopDepth() > LoadLoop->getLoopDepth())
+          //   continue;
+          // }
+
+          if(EnableVerboseLogging)
+            llvm::errs() << "Branch Probability: " << TotalProb << "\n";
+
+          if (TotalProb > hotThreshold && !IsEdgeHot) {
             IsEdgeHot = true;
             NumPairsEquivalentStores++;
           }
@@ -302,7 +343,8 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
             NumPrunedProbabilitiesLoads++;
           }
 
-          llvm::errs() << "Is edge hot: " << IsEdgeHot << "\n";
+          if(EnableVerboseLogging)
+            llvm::errs() << "Is edge hot: " << IsEdgeHot << "\n";
 
           // for (auto *MO : Store->memoperands()) {
           //   // Value *Base = MO->getValue();
@@ -319,7 +361,8 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
           //         const DataLayout &DL = Store->getMF()->getDataLayout();
           //         const auto Alignment = GEP->getPointerAlignment(DL);
           //         llvm::errs() << "Base: " << *Base << " Source: " << *Source
-          //                      << " Alignment: " << Alignment.value() << "\n";
+          //                      << " Alignment: " << Alignment.value() <<
+          //                      "\n";
           //       }
           //     } else {
           //       llvm::errs() << "Base: " << *Base << "\n";
@@ -328,11 +371,13 @@ struct RISCVMarkPairwiseAliasingLS : public MachineFunctionPass {
           //   }
           // }
 
-          llvm::errs() << "Block Frequency: "
-                       << MBFI->getBlockFreq(Store->getParent()).getFrequency()
-                       << "\n";
+          if(EnableVerboseLogging) {
+            llvm::errs() << "Block Frequency: "
+                        << MBFI->getBlockFreq(Store->getParent()).getFrequency()
+                        << "\n";
 
-          llvm::errs() << "==============================\n";
+            llvm::errs() << "==============================\n";
+          }
         } else {
           NumPrunedAlreadyAnnotatedLoads++;
         }
@@ -384,10 +429,8 @@ llvm::SmallVector<MachineInstr *>
 RISCVMarkPairwiseAliasingLS::filterInstructions(
     MachineFunction &MF, std::function<bool(MachineInstr *)> pred) {
   llvm::SmallVector<MachineInstr *> stores;
-  for (auto I = MF.begin(), E = MF.end(); I != E; ++I) {
-    MachineBasicBlock *MBB = &*I;
-    for (auto MBBI = MBB->begin(), MBBE = MBB->end(); MBBI != MBBE;) {
-      MachineInstr &MI = *MBBI++;
+  for (auto &MBB : make_range(MF.begin(), MF.end())) {
+    for (auto &MI : make_range(MBB.begin(), MBB.end())) {
       if (pred(&MI)) {
         stores.push_back(&MI);
       }
@@ -450,7 +493,8 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
                              AA, MBPI, TII, IsInstructionMatch);
 
     // const auto AliasInfosTrivial =
-    //     computeAliasDistance(MachineInstrOrBlock{Store}, Store, MDT, MPDT, MLI,
+    //     computeAliasDistance(MachineInstrOrBlock{Store}, Store, MDT, MPDT,
+    //     MLI,
     //                          AA, MBPI, TII, IsInstructionMatchTrivial);
 
     TrivialMatchingLoads = 0;
@@ -465,29 +509,33 @@ bool RISCVMarkPairwiseAliasingLS::runOnMachineFunction(MachineFunction &MF) {
           return std::get<1>(AI).Type == AliasType::CacheLineAlias ? acc + 1
                                                                    : acc;
         });
-        
+
     NumPairsSimpleAlias += TrivialMatchingLoads;
     NumPairsMustAlias += DetectedAliasingLoads;
     NumPairsCacheLineAlias += DetectedCacheAliasingLoads;
 
-    for (auto& [Load, AliasInfo] : AliasInfos) {
+    for (auto &[Load, AliasInfo] : AliasInfos) {
       LoadToStoreMap[Load].push_back({AliasInfo, Store});
     }
 
-    //MarkedLoads = insertHints(AliasInfos, Store, MarkedInstr, TRI, MBPI, MBFI);
+    // MarkedLoads = insertHints(AliasInfos, Store, MarkedInstr, TRI, MBPI,
+    // MBFI);
     AliasInfosMap[Store] = AliasInfos;
   }
 
-  for (auto& [Store, AliasInfos] : AliasInfosMap) {
-    MarkedLoads = insertHints(AliasInfos, Store, MarkedInstr, LoadToStoreMap, TRI, MBPI, MBFI);
+  for (auto &[Store, AliasInfos] : AliasInfosMap) {
+    MarkedLoads = insertHints(AliasInfos, Store, MarkedInstr, LoadToStoreMap,
+                              TRI, MBPI, MLI, MBFI);
   }
 
   NumPairsAnnotated += MarkedLoads;
 
-  llvm::errs() << "Marked loads: " << MarkedLoads
-               << " as hints on function: " << MF.getName() << " of which "
-               << TrivialMatchingLoads << " are trivially matching and "
-               << DetectedAliasingLoads << " are detected aliasing\n";
+  if(EnableVerboseLogging) {
+    llvm::errs() << "Marked loads: " << MarkedLoads
+                << " as hints on function: " << MF.getName() << " of which "
+                << TrivialMatchingLoads << " are trivially matching and "
+                << DetectedAliasingLoads << " are detected aliasing\n";
+  }
 
   return Changed;
 }
@@ -503,13 +551,14 @@ AliasInformations RISCVMarkPairwiseAliasingLS::computeAliasDistance(
 
   SmallVector<MachineInstrOrBlockWithSucc, 8> WorkList;
   WorkList.push_back(
-      MachineInstrOrBlockWithSucc{InstrOrBlock, BranchingSuccs(), StoreInstr->getParent()});
+      MachineInstrOrBlockWithSucc{InstrOrBlock, BranchingSuccs(), nullptr});
   SmallPtrSet<MachineBasicBlock *, 4> VisitedMBB;
 
   AliasInformations AliasInfos;
 
   do {
-    auto [CurrentInstrOrBlock, CurrentSucc, LastDependentBlock] = WorkList.pop_back_val();
+    auto [CurrentInstrOrBlock, CurrentSucc, LastDependentBlock] =
+        WorkList.pop_back_val();
 
     const bool IsInstr =
         std::holds_alternative<MachineInstr *>(CurrentInstrOrBlock);
@@ -536,9 +585,9 @@ AliasInformations RISCVMarkPairwiseAliasingLS::computeAliasDistance(
           }
         }
 
-        auto IsBlocker = [&](MachineInstr const &StoreI, MachineInstr const *I) {
-          if(I == StoreInstr)
-          {
+        auto IsBlocker = [&](MachineInstr const &StoreI,
+                             MachineInstr const *I) {
+          if (I == StoreInstr) {
             return false;
           }
 
@@ -546,15 +595,15 @@ AliasInformations RISCVMarkPairwiseAliasingLS::computeAliasDistance(
           if (HasMemOp && I->mayStore()) {
             if (I->mustAlias(AA, StoreI, false))
               return true;
-            if (I->partialAlias(AA, StoreI, false, LoadExclusiveCacheLineWindow))
+            if (I->partialAlias(AA, StoreI, false,
+                                LoadExclusiveCacheLineWindow))
               return true;
           }
 
           return false;
         };
 
-        if(IsBlocker(*StoreInstr, &I))
-        {
+        if (IsBlocker(*StoreInstr, &I)) {
           break;
         }
 
@@ -566,16 +615,17 @@ AliasInformations RISCVMarkPairwiseAliasingLS::computeAliasDistance(
             const auto BranchProb = MBPI->getEdgeProbability(U, V);
 
             if (!Prob.isUnknown()) {
-                Prob *= BranchProb;
+              Prob *= BranchProb;
             }
           }
 
-          if(EnableHintFurthest)
-          {
+          if (EnableHintFurthest) {
             // insert at @front
-            AliasInfos.insert(AliasInfos.begin(), {AliasingLoad, AliasInfo(AT, Prob, CurrentSucc)});
+            AliasInfos.insert(AliasInfos.begin(),
+                              {AliasingLoad, AliasInfo(AT, Prob, CurrentSucc)});
           } else {
-            AliasInfos.push_back({AliasingLoad, AliasInfo(AT, Prob, CurrentSucc)});
+            AliasInfos.push_back(
+                {AliasingLoad, AliasInfo(AT, Prob, CurrentSucc)});
           }
 
           // If we are not greedy, we can stop after the first aliasing L/S pair
@@ -588,40 +638,47 @@ AliasInformations RISCVMarkPairwiseAliasingLS::computeAliasDistance(
       MBB = std::get<MachineBasicBlock *>(CurrentInstrOrBlock);
     }
 
-    if (HasEncounteredCallOrAtomic) {
-      return AliasInfos;
-    }
+    if (!HasEncounteredCallOrAtomic) {
+      const auto IsControlDependent =
+          [&](MachineBasicBlock *Pred, MachineBasicBlock *Block,
+              const MachineBasicBlock *LastDependentBB) {
+            return MPDT->dominates(LastDependentBB, Block) &&
+                   !MPDT->properlyDominates(LastDependentBB, Pred);
+          };
 
-    const auto IsControlDependent = [&](MachineBasicBlock *Pred) {
-      return MPDT->dominates(LastDependentBlock, MBB) &&
-             !MPDT->properlyDominates(LastDependentBlock, Pred);
-    };
+      const MachineLoop *CurLoop = MLI->getLoopFor(MBB);
+      for (MachineBasicBlock *Pred : MBB->predecessors()) {
+        const bool IsBackEdge = CurLoop && MBB == CurLoop->getHeader();
+        const bool HasNotVisited = !VisitedMBB.count(Pred);
+        const bool IsReachable = MDT->dominates(Pred, MBB);
 
-    const MachineLoop *CurLoop = MLI->getLoopFor(MBB);
-    for (MachineBasicBlock *Pred : MBB->predecessors()) {
-      const bool IsBackEdge = CurLoop && MBB == CurLoop->getHeader();
-      const bool HasNotVisited = !VisitedMBB.count(Pred);
-      const bool IsReachable = MDT->dominates(Pred, MBB);
+        // Check if the store is control dependent on the edge from Pred to MBB
+        const MachineBasicBlock *DependentBlock = LastDependentBlock;
+        if (LastDependentBlock &&
+            IsControlDependent(Pred, MBB, LastDependentBlock)) {
+          CurrentSucc.insert(std::make_pair(Pred, MBB));
+          DependentBlock = Pred;
+        } else if (MBB == StoreInstr->getParent()) {
+          if (IsControlDependent(Pred, MBB, MBB)) {
+            CurrentSucc.insert(std::make_pair(Pred, MBB));
+            DependentBlock = Pred;
+          }
+        }
 
-      // Check if the store is control dependent on the edge from Pred to MBB
-      const MachineBasicBlock *DependentBlock = LastDependentBlock;
-      if (IsControlDependent(Pred)) {
-        CurrentSucc.insert(std::make_pair(Pred, MBB));
-        DependentBlock = Pred;
-      }
+        if (HasNotVisited && (!IsBackEdge || (IsReachable))) {
+          VisitedMBB.insert(Pred);
 
-      if (HasNotVisited && (!IsBackEdge || (IsReachable))) {
-        VisitedMBB.insert(Pred);
+          const bool HasAnyInstr = !Pred->empty();
+          const MachineInstrOrBlockWithSucc LastInstr =
+              HasAnyInstr
+                  ? MachineInstrOrBlockWithSucc{MachineInstrOrBlock{
+                                                    &Pred->back()},
+                                                CurrentSucc, DependentBlock}
+                  : MachineInstrOrBlockWithSucc{MachineInstrOrBlock{Pred},
+                                                CurrentSucc, DependentBlock};
 
-        const bool HasAnyInstr = !Pred->empty();
-        const MachineInstrOrBlockWithSucc LastInstr =
-            HasAnyInstr ? MachineInstrOrBlockWithSucc{MachineInstrOrBlock{
-                                                          &Pred->back()},
-                                                      CurrentSucc, DependentBlock}
-                        : MachineInstrOrBlockWithSucc{MachineInstrOrBlock{Pred},
-                                                      CurrentSucc, DependentBlock};
-
-        WorkList.push_back(LastInstr);
+          WorkList.push_back(LastInstr);
+        }
       }
     }
   } while (!WorkList.empty());
